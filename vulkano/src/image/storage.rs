@@ -18,6 +18,7 @@ use format::ClearValue;
 use format::FormatDesc;
 use format::FormatTy;
 use image::Dimensions;
+use image::MipmapsCount;
 use image::ImageInner;
 use image::ImageLayout;
 use image::ImageUsage;
@@ -58,6 +59,9 @@ pub struct StorageImage<F, A = Arc<StdMemoryPool>>
     // Dimensions of the image view.
     dimensions: Dimensions,
 
+    // Number of mipmaps for the image
+    num_mipmaps: MipmapsCount,
+
     // Format.
     format: F,
 
@@ -95,7 +99,37 @@ impl<F> StorageImage<F> {
             transient_attachment: false,
         };
 
-        StorageImage::with_usage(device, dimensions, format, usage, queue_families)
+        StorageImage::with_mipmaps_usage(device, dimensions, format, 1, usage, queue_families)
+    }
+
+    /// Same as `new`, but allows specifying the mipmap count
+    pub fn with_mipmaps<'a, I, Mi>(device: Arc<Device>, dimensions: Dimensions, format: F,
+                                   mipmaps: Mi, queue_families: I)
+                                   -> Result<Arc<StorageImage<F>>, ImageCreationError>
+        where F: FormatDesc,
+              Mi: Into<MipmapsCount>,
+              I: IntoIterator<Item = QueueFamily<'a>>
+    {
+        let is_depth = match format.format().ty() {
+            FormatTy::Depth => true,
+            FormatTy::DepthStencil => true,
+            FormatTy::Stencil => true,
+            FormatTy::Compressed => panic!(),
+            _ => false,
+        };
+
+        let usage = ImageUsage {
+            transfer_source: true,
+            transfer_destination: true,
+            sampled: true,
+            storage: true,
+            color_attachment: !is_depth,
+            depth_stencil_attachment: is_depth,
+            input_attachment: true,
+            transient_attachment: false,
+        };
+
+        StorageImage::with_mipmaps_usage(device, dimensions, format, mipmaps, usage, queue_families)
     }
 
     /// Same as `new`, but allows specifying the usage.
@@ -105,10 +139,23 @@ impl<F> StorageImage<F> {
         where F: FormatDesc,
               I: IntoIterator<Item = QueueFamily<'a>>
     {
+        StorageImage::with_mipmaps_usage(device, dimensions, format, 1, usage, queue_families)
+    }
+
+    /// Same as `new`, but allows specifying the mipmap count and usage.
+    pub fn with_mipmaps_usage<'a, I, Mi>(device: Arc<Device>, dimensions: Dimensions, format: F,
+                                         mipmaps: Mi, usage: ImageUsage, queue_families: I)
+                                         -> Result<Arc<StorageImage<F>>, ImageCreationError>
+        where F: FormatDesc,
+              Mi: Into<MipmapsCount>,
+              I: IntoIterator<Item = QueueFamily<'a>>
+    {
         let queue_families = queue_families
             .into_iter()
             .map(|f| f.id())
             .collect::<SmallVec<[u32; 4]>>();
+
+        let num_mipmaps = mipmaps.into();
 
         let (image, mem_reqs) = unsafe {
             let sharing = if queue_families.len() >= 2 {
@@ -122,22 +169,22 @@ impl<F> StorageImage<F> {
                              format.format(),
                              dimensions.to_image_dimensions(),
                              1,
-                             1,
+                             num_mipmaps,
                              sharing,
                              false,
                              false)?
         };
 
         let mem = MemoryPool::alloc_from_requirements(&Device::standard_pool(&device),
-                                    &mem_reqs,
-                                    AllocLayout::Optimal,
-                                    MappingRequirement::DoNotMap,
-                                    DedicatedAlloc::Image(&image),
-                                    |t| if t.is_device_local() {
-                                        AllocFromRequirementsFilter::Preferred
-                                    } else {
-                                        AllocFromRequirementsFilter::Allowed
-                                    })?;
+                                                      &mem_reqs,
+                                                      AllocLayout::Optimal,
+                                                      MappingRequirement::DoNotMap,
+                                                      DedicatedAlloc::Image(&image),
+                                                      |t| if t.is_device_local() {
+                                                          AllocFromRequirementsFilter::Preferred
+                                                      } else {
+                                                          AllocFromRequirementsFilter::Allowed
+                                                      })?;
         debug_assert!((mem.offset() % mem_reqs.alignment) == 0);
         unsafe {
             image.bind_memory(mem.memory(), mem.offset())?;
@@ -151,14 +198,15 @@ impl<F> StorageImage<F> {
         };
 
         Ok(Arc::new(StorageImage {
-                        image: image,
-                        view: view,
-                        memory: mem,
-                        dimensions: dimensions,
-                        format: format,
-                        queue_families: queue_families,
-                        gpu_lock: AtomicUsize::new(0),
-                    }))
+            image: image,
+            view: view,
+            memory: mem,
+            dimensions: dimensions,
+            num_mipmaps,
+            format: format,
+            queue_families: queue_families,
+            gpu_lock: AtomicUsize::new(0),
+        }))
     }
 }
 
@@ -169,6 +217,12 @@ impl<F, A> StorageImage<F, A>
     #[inline]
     pub fn dimensions(&self) -> Dimensions {
         self.dimensions
+    }
+
+    /// Returns the number of mipmap levels of the image.
+    #[inline]
+    pub fn mipmap_levels(&self) -> u32 {
+        self.image.mipmap_levels()
     }
 }
 
@@ -217,9 +271,9 @@ unsafe impl<F, A> ImageAccess for StorageImage<F, A>
         // TODO: handle initial layout transition
         if expected_layout != ImageLayout::General && expected_layout != ImageLayout::Undefined {
             return Err(AccessError::UnexpectedImageLayout {
-                           requested: expected_layout,
-                           allowed: ImageLayout::General,
-                       });
+                requested: expected_layout,
+                allowed: ImageLayout::General,
+            });
         }
 
         let val = self.gpu_lock.compare_and_swap(0, 1, Ordering::SeqCst);
@@ -327,3 +381,4 @@ mod tests {
             .unwrap();
     }
 }
+
