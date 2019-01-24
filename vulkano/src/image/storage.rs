@@ -237,7 +237,7 @@ unsafe impl<F, A> ImageAccess for StorageImage<F, A>
             first_layer: 0,
             num_layers: self.dimensions.array_layers() as usize,
             first_mipmap_level: 0,
-            num_mipmap_levels: 1,
+            num_mipmap_levels: self.mipmap_levels() as usize,
         }
     }
 
