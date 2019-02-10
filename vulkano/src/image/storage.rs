@@ -235,7 +235,7 @@ unsafe impl<F, A> ImageAccess for StorageImage<F, A>
         ImageInner {
             image: &self.image,
             first_layer: 0,
-            num_layers: self.dimensions.array_layers() as usize,
+            num_layers: self.dimensions.array_layers_with_cube() as usize,
             first_mipmap_level: 0,
             num_mipmap_levels: self.mipmap_levels() as usize,
         }
